@@ -71,10 +71,17 @@ function _allowance(owner: string, spender: string): nat64 {
   // 1. ownerAccount를 가져온다.
   const ownerAccountOpt = getAccountByAddress(owner);
   if('None' in ownerAccountOpt){
-    throw new Error("Owner Account")
+    throw new Error("Owner Account not found")
   }
 
   // 2. allowance가 있는지 확인한다.
+  const ownerAccount = ownerAccountOpt.Some;
+
+  for(let allowance of ownerAccount.allowances) {
+    if (allowance.spender == spender) {
+      return allowance.amount;
+    }
+  }
   return 0n;
 }
 
@@ -100,10 +107,10 @@ function _transferFrom(from: text, to: text, amount: nat64): bool {
   const fromAccount = fromAccountOpt.Some;
 
   // 3. 받는 사람의 계정을 가져온다.
-  // 3-1. 받는 사람의 계정이 없으면 새로 만들어준다.
-  let toAccountOpt = getAccountByAddress(to)
-  let toAccount;
+  let toAccount: typeof Account;
 
+  // 3-1. 받는 사람의 계정이 없으면 새로 만들어준다.
+  const toAccountOpt = getAccountByAddress(to)
   if ('None' in toAccountOpt){
     // 수신 계정이 없으면 새로 만들기
     const newToAccount: typeof Account = {
@@ -115,6 +122,7 @@ function _transferFrom(from: text, to: text, amount: nat64): bool {
   } else {
     toAccount = toAccountOpt.Some;
   }
+
   // 4. allowance가 부족한 경우 -> transferFrom 수행 중지
 const allowance = _allowance(from, spender);
 if (allowance === undefined || allowance < amount){
@@ -133,7 +141,7 @@ if (allowance === undefined || allowance < amount){
 
   // 6. 실제로 transfer 진행
   fromAccount.balance -= amount;
-  fromAccount.balance += amount;
+  toAccount.balance += amount;
 
   insertAccount(from, fromAccount);
   insertAccount(to, toAccount);
@@ -155,7 +163,13 @@ export default Canister({
      * TO-DO: admin을 추가합니다.
      * admin을 추가하거나 삭제하는 작업은 admin 권한을 가진 사용자만 실행할 수 있어야 합니다.
      */
+    const caller = getCaller();
 
+    if (!isAdmin(caller)){
+      return false;
+    }
+
+    admins.push(address);
     return true;
   }),
 
@@ -166,7 +180,7 @@ export default Canister({
      */
     const caller = getCaller();
 
-    if (!isAdmin(caller)) {
+    if(tokenInfo.owner != caller){
       return false;
     }
 
@@ -352,14 +366,12 @@ export default Canister({
      */
 
     // 1. 함수 호출자 (=caller)가 계정이 있는지 확인
-
     // 계정이 없으면 0
-
     // 계정이 있으면 allowance 반환
 
     const spender = getCaller()
-    const spenderAccountOpt = getAccountByAddress(spender)
-    if('None' in spenderAccountOpt) {
+    const spenderAccount = getAccountByAddress(spender)
+    if('None' in spenderAccount) {
       return 0n;
     } else {
       return _allowance(owner, spender);

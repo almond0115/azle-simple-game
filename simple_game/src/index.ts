@@ -66,7 +66,7 @@ async function _burn(from: string, amount: nat64): Promise<boolean> {
   return await ic.call(tokenCanister.burn, {
     args: [from, amount],
   });
-  return true;
+
 }
 
 async function _allowanceFrom(owner: string): Promise<bigint> {
@@ -80,7 +80,7 @@ async function _allowanceFrom(owner: string): Promise<bigint> {
     args: [owner],
   });
 
-  return 0n;
+  
 }
 
 async function _transferFrom(
@@ -196,8 +196,10 @@ export default Canister({
     // 1. amount를 RETRY_RATE로 나눈 나머지 값은 버리고, 몫만 취합니다.
     // 1-1. tokenAmountToSpend 변수를 선언하고, 사용자가 소모할 토큰의 양(amount - 나머지)을 할당합니다.
     const tokenAmountToSpend = Math.floor(amount/RETRY_RATE) * RETRY_RATE;
+
     // 1-2. retryCountAmountToUpgrade 변수를 선언하고, 업그레이드 될 RetryCount의 양(amount/RETRY_COUNT의 몫)을 할당합니다.
     const retryCountAmountToUpgrade = Math.floor(amount/RETRY_RATE);
+
     // 2. tokenAmountToSpend만큼의 토큰을 소각합니다.
     const burnCallResult = await _burn(caller, BigInt(tokenAmountToSpend));
 
@@ -239,23 +241,29 @@ export default Canister({
 
       // 1. 사용자가 BetAmount만큼 approve 해두었는지 확인합니다.
       const allowance = await _allowanceFrom(caller) // caller -> 게임 캐니스터
+    
+      // 1-1. 충분한 양의 토큰을 approve 해두지 않은 경우, 생성할 수 없도록 에러를 반환합니다.
       if (allowance < betAmount){
         throw new Error("Not enough allowance");
       }
-      // 1-1. 충분한 양의 토큰을 approve 해두지 않은 경우, 생성할 수 없도록 에러를 반환합니다.
+
       // 1-2. 충분한 양의 토큰을 approve 해둔 경우, 배틀을 생성합니다.
       const newBattle: typeof Battle = {
         id: generateRandomUUID(),
         characters: [callerCharacter],
+        results: [],
         betAmount: betAmount,
         battleAdmin: caller,
         maxParticipantAmount: maxParticipantAmount,
         winner: {
           owner: "0",
+          result: 0,
           approved: false,
           gameResults: [],
         },
       };
+
+      battles.push(newBattle);
       
       return true;
     }
@@ -282,12 +290,24 @@ export default Canister({
     }
 
     // 1. 배틀을 가져옵니다.
+    const battle = _getBattleByUuid(battleId);
+
     // 1-1. 배틀에 최대인원이 다 찼다면, 참여할 수 없도록 에러를 반환합니다.
+    if (battle.maxParticipantAmount <= battle.characters.length){
+      throw new Error("battle is full");
+    }
 
     // 2. 사용자가 배틀의 betAmount만큼 approve 해두었는지 확인합니다.
-    // 2-1. 충분한 양의 토큰을 approve 해두지 않은 경우, 참여할 수 없도록 에러를 반환합니다.
-    // 2-2. 충분한 양의 토큰을 approve 해둔 경우, 배틀에 참여시킵니다.
+    const allowance = await _allowanceFrom(caller);
 
+    // 2-1. 충분한 양의 토큰을 approve 해두지 않은 경우, 참여할 수 없도록 에러를 반환합니다.
+    if(allowance < battle.betAmount){
+      throw new Error("Not enough allowance");
+    }
+
+    // 2-2. 충분한 양의 토큰을 approve 해둔 경우, 배틀에 참여시킵니다.
+    battle.characters.push(character);
+    
     return true;
   }),
 
@@ -298,14 +318,54 @@ export default Canister({
     const battle = _getBattleByUuid(battleId);
 
     // 1. endBattle은 방장(battleAdmin)만이 실행할 수 있다. 먼저 방장이 호출했는지 확인한다.
+    const caller = getCaller();
+    if (caller !== battle.battleAdmin){
+      throw new Error("Only BattleAdmin can end battle");
+    }
 
     // 2. 참여자들을 돌면서 allowance가 충분한지 확인합니다.
     // 2-1. allowance가 충분하지 않으면 배틀에서 제외합니다.
+    
     // 3. 참여자들마다 Math.random을 돌리게 한다. retryCount가 1 이상이면, 카운트 수만큼 돌리고, 가장 1에 근접한 수를 result로 삼습니다.
     // 각 참여자들의 result를 battle.results에 추가합니다.
+    for (let character of battle.characters){
+      const allowance = await _allowanceFrom(character.owner);
+
+      if (allowance < battle.betAmount){
+        battle.results.push({
+          owner: character.owner,
+          result: 0,
+          gameResults: [],
+          approved: false,
+        });
+      } else {
+        const characterGameResult: Vec<number> = [getRandomNumber()];
+        if (character.retryCount > 1) {
+          for (let i = 1; i < character.retryCount; i++) {
+            characterGameResult.push(getRandomNumber());
+          }
+        }
+        battle.results.push({
+          owner: character.owner,
+          result: Math.max(...characterGameResult),
+          gameResults: characterGameResult,
+          approved: true,
+        });
+      }
+    }
 
     // 4. 1등에게 걸린 모든 베팅금을 transfer합니다.
     // 5. 배틀 결과를 각 캐릭터의 배틀 히스토리에 저장합니다.
+    for (let i = 0 ; i < battle.results.length ; i++) {
+      _transferFrom(
+        battle.results[i].owner,
+        battle.winner.owner,
+        battle.betAmount
+      );
+
+      const character = _getCharacterByOwner(battle.results[i].owner);
+      character.battleHistory.push(battle.id);
+    }
 
     return battle;
   }),
