@@ -35,11 +35,11 @@ export const CharacterInBattle = Record({
 
 // 배틀 타입 정의
 export const Battle = Record({
-  id: text,
-  characters: Vec(Character),
-  betAmount: nat64,
-  maxParticipantAmount: nat16,
-  results: Vec(CharacterInBattle),
+  id: text,                             // 배틀의 uuid
+  characters: Vec(Character),           // 배틀에 참여한 캐릭터
+  betAmount: nat64,                     // 배틀에 걸리는 토큰의 양 (베팅 금액)
+  maxParticipantAmount: nat16,          // 최대 몇명이 참여할 수 있는지
+  results: Vec(CharacterInBattle),      // 결과
   battleAdmin: text,
   winner: CharacterInBattle,
 });
@@ -60,15 +60,26 @@ let tokenCanister: typeof TokenCanister;
 
 async function _burn(from: string, amount: nat64): Promise<boolean> {
   /*
-   * TO-DO: 토큰 컨트랙트의 burn 함수를 호출한 결과를 반환합니다.
+   * TO-DO: 토큰 컨트랙트의 burn 함수를 호출한 결과를 반환합니다. token canister의 burn함수 호출
+   * 기본적으로 비동기적으로 호출이 가능
    */
+  return await ic.call(tokenCanister.burn, {
+    args: [from, amount],
+  });
   return true;
 }
 
 async function _allowanceFrom(owner: string): Promise<bigint> {
   /*
-   * TO-DO: 토큰 컨트랙트의 allowanceFrom 함수를 호출합니다.
+   * TO-DO: 토큰 컨트랙트의 allowanceFrom 함수를 호출합니다. 
+   * 배틀을 참여할 때 배팅 금액을 approve하는 것으로 건다. 
+   * 사용자가 이 게임 canister 자체에 approve()를 사전에 해주어야 한다.
    */
+
+  return await ic.call(tokenCanister.allowanceFrom, {
+    args: [owner],
+  });
+
   return 0n;
 }
 
@@ -80,7 +91,10 @@ async function _transferFrom(
   /*
    * TO-DO: 토큰 컨트랙트의 transferFrom 함수를 호출합니다.
    */
-  return true;
+
+  return await ic.call(tokenCanister.transferFrom, {
+    args: [from, to, amount],
+  });
 }
 
 function getCaller(): string {
@@ -127,9 +141,12 @@ function generateRandomUUID(): string {
 export default Canister({
   initialize: update([text], bool, (tokenCanisterAddress) => {
     /*
-     * TO-DO: 토큰 캐니스터의 인스턴스를 생성하고 전역변수 tokenCanister에 할당합니다.
+     * TO-DO: 토큰 캐니스터의 서비스를 생성하고 전역변수 tokenCanister에 할당합니다.
      * 인자로 주어진 토큰 캐니스터의 주소를 사용하세요.
      */
+
+    tokenCanister = TokenCanister(Principal.fromText(tokenCanisterAddress)); // azle이 알아서 해당 토큰 주소를 찾아서 전달
+  
     return true;
   }),
 
@@ -141,6 +158,14 @@ export default Canister({
     /*
      * TO-DO: 사용자의 캐릭터를 생성하고, 생성된 캐릭터를 characters에 추가합니다.
      */
+    const newCharacter: typeof Character = {
+      owner: getCaller(),
+      retryCount: 1n,
+      battleHistory: [],
+    };
+
+    characters.push(newCharacter);
+
     return true;
   }),
 
@@ -148,6 +173,14 @@ export default Canister({
     /*
      * TO-DO: 사용자의 토큰을 사용해 retryCount를 업그레이드 합니다.
      * 사용자가 amount만큼 지불할 경우, amount의 비율에 따라 retryCount를 업그레이드 하고, 나머지는 돌려줘야 합니다.
+     * 
+     * amount : 350 -> retryCount : +3
+     * 토큰을 RETRY_RATE 비율대로 retryCount를 업그레이드
+     * 
+     * 토큰을 100개 지불하면 , retryCount가 +1 만큼 업그레이드 (1->2, 2->3)
+     * 토큰을 200개 지불하면 +2
+     * 토큰을 amount개 지불하면, amount/100 몫만큼 업그레이드
+     * 업그레이드 비율을 retryCount/RETRY_RATE
      */
     const caller = getCaller();
     const character = characters.find((char) => char.owner === caller);
@@ -162,13 +195,22 @@ export default Canister({
 
     // 1. amount를 RETRY_RATE로 나눈 나머지 값은 버리고, 몫만 취합니다.
     // 1-1. tokenAmountToSpend 변수를 선언하고, 사용자가 소모할 토큰의 양(amount - 나머지)을 할당합니다.
-
+    const tokenAmountToSpend = Math.floor(amount/RETRY_RATE) * RETRY_RATE;
     // 1-2. retryCountAmountToUpgrade 변수를 선언하고, 업그레이드 될 RetryCount의 양(amount/RETRY_COUNT의 몫)을 할당합니다.
-
+    const retryCountAmountToUpgrade = Math.floor(amount/RETRY_RATE);
     // 2. tokenAmountToSpend만큼의 토큰을 소각합니다.
+    const burnCallResult = await _burn(caller, BigInt(tokenAmountToSpend));
 
     // 3. retryCountAmountToUpgrade만큼 캐릭터를 업그레이드합니다.
-    if (FILL_IN) {
+    if (burnCallResult) {
+      const indexToModify = characters.findIndex(
+        (char) => char.owner == character.owner
+      );
+      if (indexToModify !== -1) {
+        characters[indexToModify].retryCount += BigInt(
+          retryCountAmountToUpgrade
+        );
+      }
       return true;
     } else {
       return false;
@@ -196,9 +238,25 @@ export default Canister({
       }
 
       // 1. 사용자가 BetAmount만큼 approve 해두었는지 확인합니다.
+      const allowance = await _allowanceFrom(caller) // caller -> 게임 캐니스터
+      if (allowance < betAmount){
+        throw new Error("Not enough allowance");
+      }
       // 1-1. 충분한 양의 토큰을 approve 해두지 않은 경우, 생성할 수 없도록 에러를 반환합니다.
       // 1-2. 충분한 양의 토큰을 approve 해둔 경우, 배틀을 생성합니다.
-
+      const newBattle: typeof Battle = {
+        id: generateRandomUUID(),
+        characters: [callerCharacter],
+        betAmount: betAmount,
+        battleAdmin: caller,
+        maxParticipantAmount: maxParticipantAmount,
+        winner: {
+          owner: "0",
+          approved: false,
+          gameResults: [],
+        },
+      };
+      
       return true;
     }
   ),
